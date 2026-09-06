@@ -1,0 +1,5 @@
+*Weights*
+*.npy
+*.pth
+*.idea
+temp*

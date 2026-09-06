@@ -1,0 +1,6 @@
+gymnasium
+ale-py
+numpy
+torch==2.13.0+cu132
+pillow
+tqdm
