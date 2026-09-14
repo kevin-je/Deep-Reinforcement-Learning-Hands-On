@@ -5,6 +5,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+from gymnasium import register_envs
 from torch.utils.data import Dataset, DataLoader
 from torch import optim
 
@@ -270,8 +271,8 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 if __name__ == '__main__':
     gym.register_envs(ale_py)
     env = gym.make('ALE/Pong-v5', render_mode='human')
-    env = ResizeImg(env, IMG_SIZE)
-    dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
-    replay_buffer = ReplayBuffer([])
 
-    env.close()
+    dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
+    dqn_tgt = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
+
+    train(env, dqn, dqn_tgt)
