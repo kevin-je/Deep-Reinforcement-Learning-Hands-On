@@ -19,11 +19,12 @@ from collections import deque
 
 from typing import List, Tuple
 
+from tqdm import tqdm
+
 
 # 超参数
-LEARNING_RATE = 3e-3
+LEARNING_RATE = 2e-4
 BATCH_SIZE = 32
-EPOCHS = 10
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,9 +34,11 @@ DECAY_STEPS = 100_000
 
 TGT_UPDATE_FREQ = 1_000
 
-NUM_EPISODES = 1
-NUM_ITERATIONS = 36
+NUM_EPISODES = 16
+NUM_ITERATIONS = 300
 NUM_FRAMES = 4
+
+RENDER_MODE = None
 
 GAMMA = 0.99
 
@@ -97,7 +100,7 @@ def play_single_step(env: gym.Env,
         # 神经网络预测 Q 值
         actions_val: torch.Tensor = dqn(obs_stack.unsqueeze(0))
         # 计算 epsilon 的值
-        epsilon = cal_epsilon(num_steps, EPSILON_START, EPSILON_END)
+        epsilon = cal_epsilon(num_steps)
         # 采用 epsilon 贪心策略
         if np.random.random() < epsilon:
             action: int = env.action_space.sample()
@@ -106,8 +109,11 @@ def play_single_step(env: gym.Env,
 
     # 将动作值输入环境
     next_obs, reward, terminated, truncated, _ = env.step(action)
-    env.render()
     done: bool = True if terminated or truncated else False
+
+    # 渲染画面
+    if RENDER_MODE == "human":
+        env.render()
 
     return action, reward, next_obs, done
 
@@ -192,7 +198,7 @@ def cal_q_val_tgt(dqn_tgt: DQN, trans: Transition, gamma: float = GAMMA) -> floa
 
     else:
         next_obs_stack = trans.next_obs_stack
-        q_val_tgt = dqn_tgt(next_obs_stack.unsqueeze(0)).argmax(dim=1).item() * gamma + trans.reward
+        q_val_tgt = dqn_tgt(next_obs_stack.unsqueeze(0)).max(dim=1).values.item() * gamma + trans.reward
 
     return q_val_tgt
 
@@ -235,14 +241,18 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
     num_steps: int = 0
 
-    for _ in range(NUM_ITERATIONS):
+    for i in range(1, NUM_ITERATIONS + 1):
+        print(f"------ Iteration {i} ------")
 
         # 开始游玩
+        print("Playing game...")
         dqn.eval()
         dqn = dqn.to("cpu")
         with torch.no_grad():
             replay_buffer = ReplayBuffer([])
-            for i in range(1, NUM_EPISODES + 1):
+            loops = tqdm(range(1, NUM_EPISODES + 1), colour="green")
+            for j in loops:
+                loops.set_description(f"Episode {j}")
 
                 buffer, steps = play_single_episode(
                     env,
@@ -253,15 +263,21 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
                 )
                 num_steps += steps
 
+            # 计算每个 episode 的平均奖励
+            avg_reward = sum(list(map(lambda x: x.reward, replay_buffer.buffer))) / NUM_EPISODES
+            print(f"Average Reward: {avg_reward}")
+
         # 创建数据集
         pong_dataset = PongDataset(replay_buffer, dqn_tgt)
         dataloader = DataLoader(pong_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
         # 模型训练
+        print("Training...")
         dqn.train()
         dqn = dqn.to(DEVICE)
-
-        for obs_stacks_t, q_vals_tgt, actions in dataloader:
+        loops = tqdm(dataloader, colour="green")
+        for batch_idx, (obs_stacks_t, q_vals_tgt, actions) in enumerate(loops, 1):
+            loops.set_description(f"Batch {batch_idx}")
 
             q_vals = dqn(obs_stacks_t.to(DEVICE))
             q_vals_tgt = q_vals_tgt.to(DEVICE)
@@ -271,18 +287,27 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
             # 计算损失
             loss = criterion(q_vals, q_vals_tgt)
+            loops.set_postfix({"loss": loss.item()})
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
+        # 保存模型权重及优化器
+        torch.save(dqn.state_dict(), "./01_Weights.pth")
+        torch.save(optimizer.state_dict(), "./01_Optimizer.pth")
+
+        print()
+
 
 if __name__ == '__main__':
+
     gym.register_envs(ale_py)
-    env = gym.make('ALE/Pong-v5', render_mode='human', obs_type="grayscale")
+    env = gym.make('ALE/Pong-v5', render_mode=RENDER_MODE, obs_type="grayscale")
     env = ResizeImg(env, IMG_SIZE)
 
     dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
     dqn_tgt = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
 
     train(env, dqn, dqn_tgt)
+    env.close()

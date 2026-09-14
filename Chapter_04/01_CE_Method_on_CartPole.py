@@ -140,6 +140,6 @@ if __name__ == "__main__":
 
         # 保存模型权重及优化器
         torch.save(net.state_dict(), "./01_Weights.pth")
-        torch.save(optimizer.state_dict(), "./01_Optimizers.pth")
+        torch.save(optimizer.state_dict(), "01_Optimizer.pth")
 
     env.close()
