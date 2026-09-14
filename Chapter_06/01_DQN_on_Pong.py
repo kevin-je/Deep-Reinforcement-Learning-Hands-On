@@ -5,7 +5,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-from gymnasium import register_envs
+
 from torch.utils.data import Dataset, DataLoader
 from torch import optim
 
@@ -33,7 +33,7 @@ DECAY_STEPS = 100_000
 
 TGT_UPDATE_FREQ = 1_000
 
-NUM_EPISODES = 36
+NUM_EPISODES = 1
 NUM_ITERATIONS = 36
 NUM_FRAMES = 4
 
@@ -192,7 +192,7 @@ def cal_q_val_tgt(dqn_tgt: DQN, trans: Transition, gamma: float = GAMMA) -> floa
 
     else:
         next_obs_stack = trans.next_obs_stack
-        q_val_tgt = dqn_tgt(next_obs_stack).argmax(dim=1).item() * gamma + trans.reward
+        q_val_tgt = dqn_tgt(next_obs_stack.unsqueeze(0)).argmax(dim=1).item() * gamma + trans.reward
 
     return q_val_tgt
 
@@ -217,11 +217,14 @@ class PongDataset(Dataset):
         with torch.no_grad():
             self.q_vals_tgt = list(map(fn, replay_buffer.buffer))
 
+        # 获取每个转移的动作值
+        self.actions = list(map(lambda x: x.action, replay_buffer.buffer))
+
     def __len__(self):
         return len(self.observations)
 
     def __getitem__(self, item):
-        return self.observations[item], self.q_vals_tgt[item]
+        return self.observations[item], self.q_vals_tgt[item], self.actions[item]
 
 
 def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
@@ -239,7 +242,7 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
         dqn = dqn.to("cpu")
         with torch.no_grad():
             replay_buffer = ReplayBuffer([])
-            for i in range(1, NUM_FRAMES + 1):
+            for i in range(1, NUM_EPISODES + 1):
 
                 buffer, steps = play_single_episode(
                     env,
@@ -258,9 +261,15 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
         dqn.train()
         dqn = dqn.to(DEVICE)
 
-        for obs_stacks_t, q_vals_tgt in dataloader:
-            # 计算损失
+        for obs_stacks_t, q_vals_tgt, actions in dataloader:
+
             q_vals = dqn(obs_stacks_t.to(DEVICE))
+            q_vals_tgt = q_vals_tgt.to(DEVICE)
+            actions = actions.to(DEVICE)
+
+            q_vals = q_vals.gather(1, actions.unsqueeze(1)).squeeze(1)
+
+            # 计算损失
             loss = criterion(q_vals, q_vals_tgt)
 
             optimizer.zero_grad()
@@ -270,7 +279,8 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
 if __name__ == '__main__':
     gym.register_envs(ale_py)
-    env = gym.make('ALE/Pong-v5', render_mode='human')
+    env = gym.make('ALE/Pong-v5', render_mode='human', obs_type="grayscale")
+    env = ResizeImg(env, IMG_SIZE)
 
     dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
     dqn_tgt = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
