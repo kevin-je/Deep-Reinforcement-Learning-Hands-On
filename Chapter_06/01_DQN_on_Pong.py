@@ -11,7 +11,7 @@ from torch import optim
 
 from PIL import Image
 
-import matplotlib.pyplot as plt
+import os
 
 from dataclasses import dataclass
 
@@ -28,13 +28,13 @@ BATCH_SIZE = 32
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-EPSILON_START = 0.9
+EPSILON_START = 0.2
 EPSILON_END = 0.05
-DECAY_STEPS = 100_000
+DECAY_STEPS = 10_000
 
 TGT_UPDATE_FREQ = 1_000
 
-NUM_EPISODES = 16
+NUM_EPISODES = 32
 NUM_ITERATIONS = 300
 NUM_FRAMES = 4
 
@@ -238,6 +238,8 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
     # 创建 criterion 和 optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(dqn.parameters(), lr=LEARNING_RATE)
+    if os.path.exists("./01_Optimizer.pth"):
+        optimizer.load_state_dict(torch.load("./01_Optimizer.pth"))
 
     num_steps: int = 0
 
@@ -254,14 +256,13 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
             for j in loops:
                 loops.set_description(f"Episode {j}")
 
-                buffer, steps = play_single_episode(
+                buffer, num_steps = play_single_episode(
                     env,
                     dqn,
                     dqn_tgt,
                     num_steps,
                     replay_buffer
                 )
-                num_steps += steps
 
             # 计算每个 episode 的平均奖励
             avg_reward = sum(list(map(lambda x: x.reward, replay_buffer.buffer))) / NUM_EPISODES
@@ -306,8 +307,12 @@ if __name__ == '__main__':
     env = gym.make('ALE/Pong-v5', render_mode=RENDER_MODE, obs_type="grayscale")
     env = ResizeImg(env, IMG_SIZE)
 
-    dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
+    dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n).to(DEVICE)
     dqn_tgt = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
+
+    # 加载模型权重
+    if os.path.exists("./01_Weights.pth"):
+        dqn.load_state_dict(torch.load("./01_Weights.pth"))
 
     train(env, dqn, dqn_tgt)
     env.close()
