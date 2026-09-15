@@ -3,13 +3,13 @@ import gymnasium as gym
 
 import numpy as np
 
+import random
+
 import torch
 import torch.nn as nn
-
-from torch.utils.data import Dataset, DataLoader
 from torch import optim
 
-from PIL import Image
+import cv2 as cv
 
 import os
 
@@ -17,25 +17,30 @@ from dataclasses import dataclass
 
 from collections import deque
 
-from typing import List, Tuple
+from typing import Tuple
 
 from tqdm import tqdm
+
+import json
 
 
 # 超参数
 LEARNING_RATE = 2e-4
 BATCH_SIZE = 32
 
+BUFFER_SIZE = 10_000
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 EPSILON_START = 0.2
 EPSILON_END = 0.05
-DECAY_STEPS = 10_000
+DECAY_STEPS = 150_000
+
+SCORE_BOUNDARY= 21
 
 TGT_UPDATE_FREQ = 1_000
 
 NUM_EPISODES = 32
-NUM_ITERATIONS = 300
 NUM_FRAMES = 4
 
 RENDER_MODE = None
@@ -65,7 +70,7 @@ class DQN(nn.Module):
         self.sequential_ff = nn.Sequential(linear1, relu, linear2)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.sequential_ff(self.sequential_conv(obs))
+        return self.sequential_ff(self.sequential_conv(obs/255.0))
 
 
 @dataclass
@@ -76,12 +81,9 @@ class Transition:
     next_obs_stack: torch.Tensor
     done: bool
 
-@dataclass
-class ReplayBuffer:
-    buffer: List[Transition]
 
-
-def play_single_step(env: gym.Env,
+def play_single_step(
+        env: gym.Env,
         obs_stack: torch.Tensor,
         dqn: DQN,
         dqn_tgt: DQN,
@@ -123,12 +125,14 @@ def play_single_episode(
         dqn: DQN,
         dqn_tgt: DQN,
         num_steps: int,
-        replay_buffer: ReplayBuffer,
+        replay_buffer: deque,
         num_frames: int = NUM_FRAMES
-) -> Tuple[ReplayBuffer, int]:
+) -> Tuple[deque, int, float]:
 
     obs_stack: deque = deque(maxlen=num_frames)       # [tensor(84, 84)]
     next_obs_stack: deque = deque(maxlen=num_frames)
+
+    score: int = 0
 
     # 初始化环境
     obs, _ = env.reset()
@@ -136,9 +140,10 @@ def play_single_episode(
 
     while True:
         obs_stack.append(obs)
-        obs_stack_t = torch.tensor(
+        obs_stack_t = torch.as_tensor(
             np.asarray(obs_stack),
-            dtype=torch.float32
+            dtype=torch.uint8,
+            device=DEVICE
         )
 
         action, reward, next_obs, done = play_single_step(
@@ -149,6 +154,7 @@ def play_single_episode(
             num_steps
         )
         num_steps += 1
+        score += reward
 
         next_obs_stack.append(next_obs)
 
@@ -158,18 +164,21 @@ def play_single_episode(
                 obs_stack_t,
                 action,
                 reward,
-                torch.tensor(np.asarray(next_obs_stack), dtype=torch.float32),
+                torch.as_tensor(
+                    np.asarray(next_obs_stack),
+                    dtype=torch.uint8
+                ),
                 done
             )
 
             # 将生成的转移放入回放缓冲区
-            replay_buffer.buffer.append(trans)
+            replay_buffer.append(trans)
 
         obs = next_obs
 
         if done: break
 
-    return replay_buffer, num_steps
+    return replay_buffer, num_steps, score
 
 
 class ResizeImg(gym.ObservationWrapper):
@@ -179,17 +188,15 @@ class ResizeImg(gym.ObservationWrapper):
         self.img_size = img_size
 
     def observation(self, obs: np.ndarray) -> np.ndarray:
-        img = Image.fromarray(obs)
+        # img = Image.fromarray(obs)
         # 转换为灰度图
-        img = img.convert("L")
+        # img = img.convert("L")
         # 裁剪
-        img = img.crop((0, 30, 160, 190))
+        # img = img.crop((0, 30, 160, 190))
+        obs = obs[30:191, :161]
         # 缩放
-        img = img.resize(self.img_size)
-        # 转 numpy 数组
-        obs = np.asarray(img, dtype=np.float32)
-        # 归一化
-        return obs / 255.0
+        obs = cv.resize(obs, self.img_size)
+        return obs
 
 
 def cal_q_val_tgt(dqn_tgt: DQN, trans: Transition, gamma: float = GAMMA) -> float:
@@ -210,70 +217,57 @@ def cal_epsilon(
         decay_steps: int = DECAY_STEPS) -> float:
     return max(epsilon_start - (step / decay_steps), epsilon_end)
 
-class PongDataset(Dataset):
-    def __init__(self, replay_buffer: ReplayBuffer, dqn_tgt: DQN) -> None:
-        super().__init__()
 
-        # 获取观测值
-        self.observations = list(map(lambda x: x.obs_stack, replay_buffer.buffer))
-
-        # 获取目标 Q 值
-        fn = lambda x: cal_q_val_tgt(dqn_tgt, x)
-        dqn_tgt.eval()
-        with torch.no_grad():
-            self.q_vals_tgt = list(map(fn, replay_buffer.buffer))
-
-        # 获取每个转移的动作值
-        self.actions = list(map(lambda x: x.action, replay_buffer.buffer))
-
-    def __len__(self):
-        return len(self.observations)
-
-    def __getitem__(self, item):
-        return self.observations[item], self.q_vals_tgt[item], self.actions[item]
+def batch2tensor(batch) -> Tuple[torch.ByteTensor, torch.FloatTensor, torch.ByteTensor]:
 
 
 def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
+    # 创建回放缓冲区
+    replay_buffer = deque(maxlen=BUFFER_SIZE)
 
     # 创建 criterion 和 optimizer
     criterion = nn.MSELoss()
     optimizer = optim.Adam(dqn.parameters(), lr=LEARNING_RATE)
+
+    # 加载模型权重、优化器和步数
     if os.path.exists("./01_Optimizer.pth"):
         optimizer.load_state_dict(torch.load("./01_Optimizer.pth"))
 
-    num_steps: int = 0
+    if os.path.exists("./01_Weights.pth"):
+        dqn.load_state_dict(torch.load("./01_Weights.pth"))
 
-    for i in range(1, NUM_ITERATIONS + 1):
-        print(f"------ Iteration {i} ------")
+    if os.path.exists("./01_check_point.json"):
+        with open("./01_check_point.json", "r") as f:
+            num_steps = json.load(f)["num_steps"]
+    else: num_steps: int = 0
 
+    episode_idx: int = 0
+    while True:
         # 开始游玩
-        print("Playing game...")
+        print("Playing...")
         dqn.eval()
-        dqn = dqn.to("cpu")
         with torch.no_grad():
-            replay_buffer = ReplayBuffer([])
-            loops = tqdm(range(1, NUM_EPISODES + 1), colour="green")
-            for j in loops:
-                loops.set_description(f"Episode {j}")
 
-                buffer, num_steps = play_single_episode(
-                    env,
-                    dqn,
-                    dqn_tgt,
-                    num_steps,
-                    replay_buffer
-                )
+            replay_buffer, num_steps, score = play_single_episode(
+                env,
+                dqn,
+                dqn_tgt,
+                num_steps,
+                replay_buffer
+            )
 
-            # 计算每个 episode 的平均奖励
-            avg_reward = sum(list(map(lambda x: x.reward, replay_buffer.buffer))) / NUM_EPISODES
-            print(f"Average Reward: {avg_reward}")
+            episode_idx += 1
+            print(f"Episode: {episode_idx:06d}; Score: {score:3d}")
+            if score == SCORE_BOUNDARY:
+                print("Solved!")
+                break
 
-        # 创建数据集
-        pong_dataset = PongDataset(replay_buffer, dqn_tgt)
-        dataloader = DataLoader(pong_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
         # 模型训练
         print("Training...")
+        # 从回放缓冲区采样
+        batch = random.sample(replay_buffer, BATCH_SIZE)
+
         dqn.train()
         dqn = dqn.to(DEVICE)
         loops = tqdm(dataloader, colour="green")
@@ -294,9 +288,11 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
             loss.backward()
             optimizer.step()
 
-        # 保存模型权重及优化器
+        # 保存模型权重、优化器和步数
         torch.save(dqn.state_dict(), "./01_Weights.pth")
         torch.save(optimizer.state_dict(), "./01_Optimizer.pth")
+        with open("./01_check_point.json", "w") as f:
+            json.dump({"num_steps": num_steps}, f)
 
         print()
 
@@ -310,9 +306,6 @@ if __name__ == '__main__':
     dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n).to(DEVICE)
     dqn_tgt = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n)
 
-    # 加载模型权重
-    if os.path.exists("./01_Weights.pth"):
-        dqn.load_state_dict(torch.load("./01_Weights.pth"))
 
     train(env, dqn, dqn_tgt)
     env.close()
