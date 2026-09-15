@@ -17,8 +17,9 @@ from dataclasses import dataclass
 
 from collections import deque
 
-from typing import Tuple
+from typing import Tuple, List
 
+from torchvision.datasets import flickr
 from tqdm import tqdm
 
 import json
@@ -77,7 +78,7 @@ class DQN(nn.Module):
 class Transition:
     obs_stack: torch.Tensor
     action: int
-    reward: float
+    reward: int | float
     next_obs_stack: torch.Tensor
     done: bool
 
@@ -100,7 +101,13 @@ def play_single_step(
 
     else:
         # 神经网络预测 Q 值
-        actions_val: torch.Tensor = dqn(obs_stack.unsqueeze(0))
+        actions_val: torch.Tensor = dqn(
+            torch.as_tensor(
+                obs_stack,
+                dtype=torch.uint8,
+                device = DEVICE
+            ).unsqueeze(0)
+        )
         # 计算 epsilon 的值
         epsilon = cal_epsilon(num_steps)
         # 采用 epsilon 贪心策略
@@ -111,6 +118,8 @@ def play_single_step(
 
     # 将动作值输入环境
     next_obs, reward, terminated, truncated, _ = env.step(action)
+    assert type(next_obs) is np.ndarray
+    assert type(reward) is int
     done: bool = True if terminated or truncated else False
 
     # 渲染画面
@@ -132,11 +141,10 @@ def play_single_episode(
     obs_stack: deque = deque(maxlen=num_frames)       # [tensor(84, 84)]
     next_obs_stack: deque = deque(maxlen=num_frames)
 
-    score: int = 0
+    score = 0
 
     # 初始化环境
     obs, _ = env.reset()
-    assert type(obs) is np.ndarray
 
     while True:
         obs_stack.append(obs)
@@ -187,19 +195,19 @@ class ResizeImg(gym.ObservationWrapper):
 
         self.img_size = img_size
 
-    def observation(self, obs: np.ndarray) -> np.ndarray:
+    def observation(self, observation: np.ndarray) -> np.ndarray:
         # img = Image.fromarray(obs)
         # 转换为灰度图
         # img = img.convert("L")
         # 裁剪
         # img = img.crop((0, 30, 160, 190))
-        obs = obs[30:191, :161]
+        observation = observation[30:191, :161]
         # 缩放
-        obs = cv.resize(obs, self.img_size)
-        return obs
+        observation = cv.resize(observation, self.img_size)
+        return observation
 
 
-def cal_q_val_tgt(dqn_tgt: DQN, trans: Transition, gamma: float = GAMMA) -> float:
+def cal_q_val_tgt(dqn_tgt: DQN, next_obs_stack_t: torch.ByteTensor, gamma: float = GAMMA) -> float:
     if trans.done:
         q_val_tgt = trans.reward
 
@@ -218,7 +226,17 @@ def cal_epsilon(
     return max(epsilon_start - (step / decay_steps), epsilon_end)
 
 
-def batch2tensor(batch) -> Tuple[torch.ByteTensor, torch.FloatTensor, torch.ByteTensor]:
+def get_samples(batch: List[Transition], dqn_tgt: DQN) -> Tuple[torch.ByteTensor, torch.FloatTensor]:
+    obs_stacks_t = []
+    actions_t = []
+    rewards_t =[]
+
+    for trans in batch:
+        obs_stacks_t.append(trans.obs_stack)
+        actions_t.append(trans.action)
+        rewards_t.append(trans.reward)
+
+
 
 
 def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
