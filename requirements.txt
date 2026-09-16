@@ -2,3 +2,4 @@ gymnasium
 ale-py
 pillow
 tqdm
+opencv-python
