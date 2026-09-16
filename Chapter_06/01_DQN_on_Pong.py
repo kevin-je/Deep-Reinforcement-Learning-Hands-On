@@ -10,6 +10,7 @@ import torch.nn as nn
 from torch import optim
 
 import cv2 as cv
+import matplotlib.pyplot as plt
 
 import os
 from copy import copy
@@ -27,19 +28,18 @@ import json
 LEARNING_RATE = 2e-4
 BATCH_SIZE = 32
 
-BUFFER_SIZE = 1_000
+BUFFER_SIZE = 100_000
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 EPSILON_START = 0.99
 EPSILON_END = 0.05
-DECAY_STEPS = 150_000
+DECAY_STEPS = 300_000
 
 SCORE_BOUNDARY= 21
 
-TGT_UPDATE_FREQ = 1_000
+TGT_UPDATE_FREQ = 6_000
 
-NUM_EPISODES = 32
 NUM_FRAMES = 4
 
 RENDER_MODE = None
@@ -125,38 +125,40 @@ def play_single_step(
     return action, reward, next_obs, done
 
 
-def init_reply_buffer(
-        env: gym.Env,
-        replay_buffer: deque[Transition]
-) -> Tuple[deque[Transition], int]:
-    assert len(replay_buffer) == 0
+def init_obs_stack(env: gym.Env) -> Transition:
+    env.reset()
+    # 按下开火键
+    obs, reward, terminated, truncated, _ = env.step(1)
 
     obs_stack = deque(maxlen=NUM_FRAMES)
-    obs, _ = env.reset()
     next_obs_stack = deque(maxlen=NUM_FRAMES)
 
     action = 0
-    reward: int = 0
+    reward = 0
     done = False
-    score = 0
 
     for _ in range(NUM_FRAMES):
         obs_stack.append(obs)
         action = env.action_space.sample()
         next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = truncated or terminated
         next_obs_stack.append(next_obs)
         obs = next_obs
-        score += reward
 
-    trans = Transition(
-        obs_stack=obs_stack,
-        action=action,
-        reward=reward,
-        next_obs_stack=next_obs_stack,
-        done=done
-    )
+    return Transition(obs_stack=obs_stack, action=action, reward=reward, next_obs_stack=next_obs_stack, done=done)
+
+
+def init_reply_buffer(
+        env: gym.Env,
+        replay_buffer: deque[Transition]
+) -> deque[Transition]:
+
+    assert len(replay_buffer) == 0
+
+    trans = init_obs_stack(env)
     replay_buffer.append(trans)
-    return replay_buffer, score
+
+    return replay_buffer
 
 
 class ResizeImg(gym.ObservationWrapper):
@@ -166,7 +168,7 @@ class ResizeImg(gym.ObservationWrapper):
         self.img_size = img_size
 
     def observation(self, observation: np.ndarray) -> np.ndarray:
-        observation = observation[30:191, :161]
+        observation = observation[30:191]
         # 缩放
         observation = cv.resize(observation, self.img_size)
         return observation
@@ -192,26 +194,27 @@ def get_replay_buffer(
     done = replay_buffer[-1].done
 
     if done:
-        obs, _ = env.reset()
-        obs_stack.append(obs)
+        trans = init_obs_stack(env)
         score = 0
 
-    action, reward, next_obs, done = play_single_step(env, obs_stack, dqn, num_steps)
-    num_steps += 1
-    score += reward
+    else:
+        action, reward, next_obs, done = play_single_step(env, obs_stack, dqn, num_steps)
+        num_steps += 1
+        score += reward
 
-    # 获取 next_obs_stack
-    next_obs_stack = copy(obs_stack)
-    next_obs_stack.append(next_obs)
+        # 获取 next_obs_stack
+        next_obs_stack = copy(obs_stack)
+        next_obs_stack.append(next_obs)
 
-    # 生成一条 transition 并放入回放缓冲区
-    trans = Transition(
-        obs_stack = obs_stack,
-        action = action,
-        reward = reward,
-        next_obs_stack = next_obs_stack,
-        done = done
-    )
+        # 生成一条 transition 并放入回放缓冲区
+        trans = Transition(
+            obs_stack = obs_stack,
+            action = action,
+            reward = reward,
+            next_obs_stack = next_obs_stack,
+            done = done
+        )
+
     replay_buffer.append(trans)
     return replay_buffer, num_steps, score
 
@@ -284,9 +287,10 @@ def cal_loss(
     obs_stacks_t, actions_t, tgt_q_vals_t = get_samples(batch, dqn_tgt)
 
     # 损失计算
-    q_vals_t: torch.Tensor = dqn(obs_stacks_t).gather(1, actions_t.unsqueeze(1))
+    q_vals_t: torch.Tensor = dqn(obs_stacks_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
     loss = criterion(q_vals_t, tgt_q_vals_t)
     return loss
+
 
 def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
@@ -310,11 +314,13 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
     # 创建回放缓冲区
     replay_buffer = deque(maxlen=BUFFER_SIZE)
     # 先玩几步，初始化缓冲区
-    replay_buffer, score = init_reply_buffer(env, replay_buffer)
+    replay_buffer = init_reply_buffer(env, replay_buffer)
 
     dqn_tgt.eval()
 
     episode_idx: int = 0
+    score = 0
+
     while True:
         # 开始正式游玩
         dqn.eval()
@@ -326,7 +332,8 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
         # 记录 episode 数
         if replay_buffer[-1].done:
             episode_idx += 1
-            print(f"Episode: {episode_idx:06d}; Score: {int(score):3d}")
+            epsilon: float = cal_epsilon(num_steps)
+            print(f"Episode: {episode_idx:06d}; Score: {int(score):3d}; Epsilon: {epsilon:.3f}")
 
             if score >= SCORE_BOUNDARY:
                 print("Solved!")
@@ -339,19 +346,18 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
             # 计算损失
             loss = cal_loss(replay_buffer, dqn, dqn_tgt, criterion)
-            print(f"loss: {loss.item():2.3f}")
 
+            # 反向传播
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
+        if replay_buffer[-1].done and len(replay_buffer) == BUFFER_SIZE:
             # 保存模型权重、优化器和步数
             torch.save(dqn.state_dict(), "./01_Weights.pth")
             torch.save(optimizer.state_dict(), "./01_Optimizer.pth")
             with open("./01_checkpoint.json", "w") as f:
                 json.dump({"num_steps": num_steps}, f)
-
-            print()
 
 
 if __name__ == '__main__':
