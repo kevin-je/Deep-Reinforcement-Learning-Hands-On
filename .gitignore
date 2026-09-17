@@ -1,6 +1,7 @@
+*Optimizers*
+*Weights*
 *.npy
-#*.pth
+*.pth
 *.idea
 temp*
-test*
-#*checkpoint*
+*checkpoint*
