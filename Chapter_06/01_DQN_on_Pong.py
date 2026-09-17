@@ -28,17 +28,17 @@ import json
 LEARNING_RATE = 2e-4
 BATCH_SIZE = 32
 
-BUFFER_SIZE = 100_000
+BUFFER_SIZE = 10_000
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 EPSILON_START = 0.99
 EPSILON_END = 0.05
-DECAY_STEPS = 300_000
+DECAY_STEPS = 100_000
 
-SCORE_BOUNDARY= 21
+SCORE_BOUNDARY= 20
 
-TGT_UPDATE_FREQ = 6_000
+TGT_UPDATE_FREQ = 3_000
 
 NUM_FRAMES = 4
 
@@ -91,28 +91,24 @@ def play_single_step(
         num_steps: int
 ) -> Tuple[int, float, np.ndarray, bool]:
 
-    if len(obs_stack) < NUM_FRAMES:
+    # 神经网络预测 Q 值
+    actions_val: torch.Tensor = dqn(
+        torch.as_tensor(
+            np.asarray(
+                obs_stack,
+                dtype=np.uint8
+            ),
+            device=DEVICE,
+            dtype=torch.uint8
+        ).unsqueeze(0)
+    )
+    # 计算 epsilon 的值
+    epsilon = cal_epsilon(num_steps)
+    # 采用 epsilon 贪心策略
+    if np.random.random() < epsilon:
         action: int = env.action_space.sample()
-
     else:
-        # 神经网络预测 Q 值
-        actions_val: torch.Tensor = dqn(
-            torch.as_tensor(
-                np.asarray(
-                    obs_stack,
-                    dtype=np.uint8
-                ),
-                device=DEVICE,
-                dtype=torch.uint8
-            ).unsqueeze(0)
-        )
-        # 计算 epsilon 的值
-        epsilon = cal_epsilon(num_steps)
-        # 采用 epsilon 贪心策略
-        if np.random.random() < epsilon:
-            action: int = env.action_space.sample()
-        else:
-            action: int = int(actions_val.argmax(dim=1).item())
+        action: int = int(actions_val.argmax(dim=1).item())
 
     # 将动作值输入环境
     next_obs, reward, terminated, truncated, _ = env.step(action)
