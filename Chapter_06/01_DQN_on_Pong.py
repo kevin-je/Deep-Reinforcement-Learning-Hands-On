@@ -10,7 +10,6 @@ import torch.nn as nn
 from torch import optim
 
 import cv2 as cv
-import matplotlib.pyplot as plt
 
 import os
 from copy import copy
@@ -26,7 +25,7 @@ import json
 
 # 超参数
 LEARNING_RATE = 2e-4
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 
 BUFFER_SIZE = 10_000
 
@@ -34,11 +33,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 EPSILON_START = 0.99
 EPSILON_END = 0.05
-DECAY_STEPS = 100_000
+DECAY_STEPS = 200_000
 
 SCORE_BOUNDARY= 20
 
-TGT_UPDATE_FREQ = 3_000
+TAU = 1e-3
 
 NUM_FRAMES = 4
 
@@ -72,6 +71,11 @@ class DQN(nn.Module):
 
         assert obs.dtype is torch.uint8
         return self.sequential_ff(self.sequential_conv(obs/255.0))
+
+@torch.no_grad()
+def soft_update(dqn: DQN, dqn_tgt: DQN, tau: float = TAU) -> None:
+    for p, p_tgt in zip(dqn.parameters(), dqn_tgt.parameters()):
+        p_tgt.mul_(1-tau).add_(p, alpha=tau)
 
 
 @dataclass
@@ -300,6 +304,7 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
     if os.path.exists("./01_Weights.pth"):
         dqn.load_state_dict(torch.load("./01_Weights.pth"))
+        dqn_tgt.load_state_dict(torch.load("./01_Weights.pth"))
 
     if os.path.exists("./01_checkpoint.json"):
         with open("./01_checkpoint.json", "r") as f:
@@ -322,8 +327,6 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
         dqn.eval()
 
         replay_buffer, num_steps, score = get_replay_buffer(env, dqn, replay_buffer, num_steps, score)
-        if num_steps % TGT_UPDATE_FREQ == 0:
-            dqn_tgt.load_state_dict(dqn.state_dict())
 
         # 记录 episode 数
         if replay_buffer[-1].done:
@@ -347,6 +350,9 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            # 软更新
+            soft_update(dqn, dqn_tgt)
 
         if replay_buffer[-1].done and len(replay_buffer) == BUFFER_SIZE:
             # 保存模型权重、优化器和步数
