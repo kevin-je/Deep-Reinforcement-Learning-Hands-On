@@ -411,7 +411,9 @@ def play(env: gym.Env, dqn: DQN, num_episodes: int) -> None:
 if __name__ == '__main__':
 
     gym.register_envs(ale_py)
-    env = gym.make('ALE/Pong-v5',
+    env = gym.make(
+        'ALE/Pong-v5',
+        render_mode="human",
         obs_type="grayscale",
         repeat_action_probability=0.25,
         full_action_space=False,
@@ -421,9 +423,9 @@ if __name__ == '__main__':
     dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n).to(DEVICE)
     dqn_tgt = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n).to(DEVICE)
 
-    train(env, dqn, dqn_tgt)
-    # if os.path.exists("./01_Weights.pth"):
-    #     dqn.load_state_dict(torch.load("./01_Weights.pth"))
-    # play(env, dqn, num_episodes=10)
+    # train(env, dqn, dqn_tgt)
+    if os.path.exists("./01_Weights.pth"):
+        dqn.load_state_dict(torch.load("./01_Weights.pth"))
+    play(env, dqn, num_episodes=10)
 
     env.close()
