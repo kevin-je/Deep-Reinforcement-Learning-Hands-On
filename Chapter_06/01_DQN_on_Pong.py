@@ -25,9 +25,9 @@ import json
 
 # 超参数
 LEARNING_RATE = 2e-4
-BATCH_SIZE = 128
+BATCH_SIZE = 64
 
-BUFFER_SIZE = 10_000
+BUFFER_SIZE = 20_000
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -92,7 +92,8 @@ def play_single_step(
         env: gym.Env,
         obs_stack: deque[np.ndarray],
         dqn: DQN,
-        num_steps: int
+        num_steps: int,
+        render_mode = RENDER_MODE,
 ) -> Tuple[int, float, np.ndarray, bool]:
 
     # 神经网络预测 Q 值
@@ -119,7 +120,7 @@ def play_single_step(
     done: bool = True if terminated or truncated else False
 
     # 渲染画面
-    if RENDER_MODE == "human":
+    if render_mode == "human":
         env.render()
 
     return action, reward, next_obs, done
@@ -166,6 +167,12 @@ class ResizeImg(gym.ObservationWrapper):
         super().__init__(env)
 
         self.img_size = img_size
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=255,
+            shape=img_size,
+            dtype=np.uint8
+        )
 
     def observation(self, observation: np.ndarray) -> np.ndarray:
         observation = observation[30:191]
@@ -279,7 +286,7 @@ def cal_loss(
         replay_buffer: deque[Transition],
         dqn: DQN,
         dqn_tgt: DQN,
-        criterion: nn.MSELoss
+        criterion: nn.Module
 ) -> torch.Tensor:
 
     # 获取样本
@@ -295,7 +302,7 @@ def cal_loss(
 def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
     # 创建 criterion 和 optimizer
-    criterion = nn.MSELoss()
+    criterion = nn.SmoothL1Loss()
     optimizer = optim.Adam(dqn.parameters(), lr=LEARNING_RATE)
 
     # 加载模型权重、优化器和步数
@@ -304,7 +311,9 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
 
     if os.path.exists("./01_Weights.pth"):
         dqn.load_state_dict(torch.load("./01_Weights.pth"))
-        dqn_tgt.load_state_dict(torch.load("./01_Weights.pth"))
+
+    if os.path.exists("./01_Weights_TGT.pth"):
+        dqn_tgt.load_state_dict(torch.load("./01_Weights_TGT.pth"))
 
     if os.path.exists("./01_checkpoint.json"):
         with open("./01_checkpoint.json", "r") as f:
@@ -357,19 +366,64 @@ def train(env: gym.Env, dqn: DQN, dqn_tgt: DQN) -> None:
         if replay_buffer[-1].done and len(replay_buffer) == BUFFER_SIZE:
             # 保存模型权重、优化器和步数
             torch.save(dqn.state_dict(), "./01_Weights.pth")
+            torch.save(dqn_tgt.state_dict(), "./01_Weights_TGT.pth")
             torch.save(optimizer.state_dict(), "./01_Optimizer.pth")
             with open("./01_checkpoint.json", "w") as f:
                 json.dump({"num_steps": num_steps}, f)
 
 
+@torch.no_grad()
+def play(env: gym.Env, dqn: DQN, num_episodes: int) -> None:
+    assert num_episodes >= 1
+    episodes_count = 0
+
+    dqn.eval()
+
+    trans = init_obs_stack(env)
+    obs_stack = trans.obs_stack
+
+    while True:
+        action = dqn(
+            torch.as_tensor(
+                np.asarray(
+                    obs_stack,
+                    dtype=np.uint8
+                ),
+                dtype=torch.uint8,
+                device=DEVICE
+            ).unsqueeze(0)
+        ).squeeze(0).argmax().item()
+
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        env.render()
+
+        done = terminated or truncated
+        obs_stack.append(next_obs)
+
+        if done:
+            trans = init_obs_stack(env)
+            obs_stack = trans.obs_stack
+            episodes_count += 1
+
+        if episodes_count == num_episodes:
+            break
+
 if __name__ == '__main__':
 
     gym.register_envs(ale_py)
-    env = gym.make('ALE/Pong-v5', render_mode=RENDER_MODE, obs_type="grayscale")
+    env = gym.make('ALE/Pong-v5',
+        obs_type="grayscale",
+        repeat_action_probability=0.25,
+        full_action_space=False,
+    )
     env = ResizeImg(env, IMG_SIZE)
 
     dqn = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n).to(DEVICE)
     dqn_tgt = DQN((NUM_FRAMES, *IMG_SIZE), env.action_space.n).to(DEVICE)
 
     train(env, dqn, dqn_tgt)
+    # if os.path.exists("./01_Weights.pth"):
+    #     dqn.load_state_dict(torch.load("./01_Weights.pth"))
+    # play(env, dqn, num_episodes=10)
+
     env.close()
